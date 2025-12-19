@@ -86,7 +86,7 @@ class MouseMover:
         print("Recording starts in:")
         for i in range(3, 0, -1):
             print(f"{i}...")
-                self._sleep_with_cancel(1.0, step=1.0)
+            self._sleep_with_cancel(1.0, step=1.0)
         print("GO! Move your mouse and click around to create a pattern!")
 
         self.mouse_positions = []
@@ -121,7 +121,7 @@ class MouseMover:
             listener.start()
 
             # Record for specified duration
-                self._sleep_with_cancel(duration, step=0.25)
+            self._sleep_with_cancel(duration, step=0.25)
             self.recording = False
             listener.stop()
 
