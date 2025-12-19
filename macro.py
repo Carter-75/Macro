@@ -6,6 +6,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
+import ctypes
 
 MIN_SUPPORTED_PYTHON = (3, 8)
 MAX_TESTED_MINOR = 13
@@ -48,19 +49,25 @@ class MouseMover:
         self.grace_period_duration = 0.5
         
     def record_mouse_movement(self, duration: int = 5):
-        """Record mouse movements and clicks for specified duration"""
+        """Record mouse movements and clicks for specified duration
+
+        Attempts to use the `pynput` listener first; if the listener fails
+        or records no events (some Windows/Python combinations cause listener
+        issues), fall back to a polling-based recorder that uses the Windows
+        `GetAsyncKeyState` API via `ctypes` when available.
+        """
         print(f"\nRecording mouse movement and clicks for {duration} seconds...")
-        
+
         print("Recording starts in:")
         for i in range(3, 0, -1):
             print(f"{i}...")
             time.sleep(1)
         print("GO! Move your mouse and click around to create a pattern!")
-        
+
         self.mouse_positions = []
         self.recording = True
         start_time = time.time()
-        
+
         def on_move(x: int, y: int):
             if self.recording:
                 elapsed = time.time() - start_time
@@ -82,17 +89,104 @@ class MouseMover:
                     'pressed': pressed,
                     'timestamp': elapsed
                 })
-        
-        # Set up mouse listener
-        listener = mouse.Listener(on_move=on_move, on_click=on_click)
-        listener.start()
-        
-        # Record for specified duration
-        time.sleep(duration)
-        self.recording = False
-        listener.stop()
-        
-        print(f"Recording complete! Captured {len(self.mouse_positions)} events.")
+
+        # Try to use pynput listener first (may raise or capture nothing)
+        try:
+            listener = mouse.Listener(on_move=on_move, on_click=on_click)
+            listener.start()
+
+            # Record for specified duration
+            time.sleep(duration)
+            self.recording = False
+            listener.stop()
+
+            print(f"Recording complete! Captured {len(self.mouse_positions)} events.")
+        except Exception as e:
+            print(f"Listener failed with error: {e}. Falling back to polling recorder...")
+            self.recording = False
+            self._fallback_record_mouse_movement(duration)
+
+        # If listener recorded nothing, use fallback polling recorder
+        if not self.mouse_positions:
+            print("No events captured by listener; using polling fallback recorder...")
+            self._fallback_record_mouse_movement(duration)
+    
+    def _fallback_record_mouse_movement(self, duration: int = 5):
+        """Fallback recorder that polls mouse position and button state.
+        Uses Windows API via ctypes when available for click detection; otherwise
+        polls `mouse_controller.position` and records moves. This is used when
+        the pynput listener fails on some environments.
+        """
+        print("\nStarting polling-based fallback recorder...")
+        start_time = time.time()
+        self.mouse_positions = []
+
+        is_windows = sys.platform.startswith('win')
+
+        last_pos = self.mouse_controller.position
+        last_buttons = {
+            'left': False,
+            'right': False,
+            'middle': False,
+            'x1': False,
+            'x2': False,
+        }
+
+        # Windows virtual-key codes
+        VK = {
+            'left': 0x01,
+            'right': 0x02,
+            'middle': 0x04,
+            'x1': 0x05,
+            'x2': 0x06,
+        }
+
+        def win_get_async(key):
+            try:
+                return bool(ctypes.windll.user32.GetAsyncKeyState(key) & 0x8000)
+            except Exception:
+                return False
+
+        poll_interval = 0.02  # 50 Hz polling
+        end_time = start_time + duration
+
+        while time.time() < end_time:
+            now = time.time()
+            ts = now - start_time
+
+            # Position
+            try:
+                pos = self.mouse_controller.position
+            except Exception:
+                pos = last_pos
+
+            if pos != last_pos:
+                self.mouse_positions.append({
+                    'type': 'move',
+                    'x': int(pos[0]),
+                    'y': int(pos[1]),
+                    'timestamp': ts
+                })
+                last_pos = pos
+
+            # Buttons (Windows only)
+            if is_windows:
+                for name, code in VK.items():
+                    pressed = win_get_async(code)
+                    if pressed != last_buttons[name]:
+                        self.mouse_positions.append({
+                            'type': 'click',
+                            'x': int(last_pos[0]),
+                            'y': int(last_pos[1]),
+                            'button': f'Button.{name}',
+                            'pressed': pressed,
+                            'timestamp': ts
+                        })
+                        last_buttons[name] = pressed
+
+            time.sleep(poll_interval)
+
+        print(f"Fallback recording complete! Captured {len(self.mouse_positions)} events.")
         
     def save_pattern(self):
         """Save recorded pattern to file"""
@@ -446,3 +540,4 @@ Press F10 at any time to stop the script completely!
 
 if __name__ == "__main__":
     main()
+
