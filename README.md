@@ -153,6 +153,7 @@ You can **move your mouse at any time** during automated replay:
 
 - Enable with `-a <minutes>` to play a **1-second, normal-volume beep** on your chosen cadence
 - The reminder timer runs independently of mouse automation, so it will fire even while the script is replaying patterns or waiting for the next interval
+- User activity cannot postpone the beep schedule; it will trigger exactly on the cadence you specify
 - Set `-a 0` (or omit the flag) to disable the reminder entirely
 - On Windows the script uses `winsound.Beep(1000, 1000)`; on other platforms it emits an ASCII bell followed by a 1-second pause to mimic the same effect
 

@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 import ctypes
+import threading
 
 try:
     import winsound
@@ -70,8 +71,10 @@ class MouseMover:
             'x2': 0x06,
         }
         self.alarm_interval_mins = max(0.0, alarm_interval_mins or 0.0)
-        self.next_alarm_time: Optional[float] = None
-        self._schedule_next_alarm()
+        self._alarm_stop_event = threading.Event()
+        self.alarm_thread: Optional[threading.Thread] = None
+        if self.alarm_interval_mins > 0:
+            self._start_alarm_thread()
         
     def record_mouse_movement(self, duration: int = 5):
         """Record mouse movements and clicks for specified duration
@@ -192,6 +195,36 @@ class MouseMover:
 
         print(f"Fallback recording complete! Captured {len(self.mouse_positions)} events.")
 
+    def _start_alarm_thread(self) -> None:
+        if self.alarm_interval_mins <= 0:
+            return
+        if self.alarm_thread and self.alarm_thread.is_alive():
+            return
+        self._alarm_stop_event.clear()
+        self.alarm_thread = threading.Thread(
+            target=self._alarm_worker,
+            name="MouseMoverAlarm",
+            daemon=True
+        )
+        self.alarm_thread.start()
+
+    def _alarm_worker(self) -> None:
+        interval_seconds = max(1.0, self.alarm_interval_mins * 60)
+        next_beep = time.time() + interval_seconds
+        while not self._alarm_stop_event.is_set():
+            wait_duration = max(0.01, next_beep - time.time())
+            if self._alarm_stop_event.wait(wait_duration):
+                break
+            self._trigger_alarm()
+            next_beep += interval_seconds
+
+    def _stop_alarm_thread(self) -> None:
+        if not self.alarm_thread:
+            return
+        self._alarm_stop_event.set()
+        self.alarm_thread.join(timeout=2.0)
+        self.alarm_thread = None
+
     def _get_mouse_position(self) -> Optional[Tuple[int, int]]:
         try:
             pos = self.mouse_controller.position
@@ -246,13 +279,6 @@ class MouseMover:
         self._check_alarm()
         return self.running
 
-    def _schedule_next_alarm(self, reference_time: Optional[float] = None) -> None:
-        if self.alarm_interval_mins <= 0:
-            self.next_alarm_time = None
-            return
-        base = reference_time if reference_time is not None else time.time()
-        self.next_alarm_time = base + self.alarm_interval_mins * 60
-
     def _trigger_alarm(self) -> None:
         timestamp = datetime.now().strftime('%H:%M:%S')
         print(f"[{timestamp}] Alarm interval reached - playing 1 second beep...")
@@ -267,14 +293,11 @@ class MouseMover:
         time.sleep(1)
 
     def _check_alarm(self) -> None:
-        if self.alarm_interval_mins <= 0 or self.next_alarm_time is None:
+        if self.alarm_interval_mins <= 0:
             return
-        now = time.time()
-        interval_seconds = self.alarm_interval_mins * 60
-        while self.running and now >= self.next_alarm_time:
-            self._trigger_alarm()
-            self.next_alarm_time += interval_seconds
-            now = time.time()
+        if not self.alarm_thread or not self.alarm_thread.is_alive():
+            if not self._alarm_stop_event.is_set():
+                self._start_alarm_thread()
 
     def wait_for_pre_replay_quiet_period(self) -> bool:
         """Enforce a brief inactivity window before replaying automation."""
@@ -697,6 +720,8 @@ Press F10 at any time to stop the script completely!
         print("\n\nInterrupted by user (Ctrl+C)")
     except Exception as e:
         print(f"\nError occurred: {e}")
+    finally:
+        mover._stop_alarm_thread()
 
 if __name__ == "__main__":
     main()
