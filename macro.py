@@ -5,8 +5,13 @@ import random
 import sys
 import time
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import ctypes
+
+try:
+    import winsound
+except ImportError:  # pragma: no cover - non-Windows
+    winsound = None
 
 MIN_SUPPORTED_PYTHON = (3, 8)
 MAX_TESTED_MINOR = 13
@@ -34,7 +39,12 @@ except ImportError as exc:  # pragma: no cover - env specific
     ) from exc
 
 class MouseMover:
-    def __init__(self, interval_mins: float, duration_mins: Optional[float] = None):
+    def __init__(
+        self,
+        interval_mins: float,
+        duration_mins: Optional[float] = None,
+        alarm_interval_mins: float = 0.0
+    ):
         self.interval_mins = interval_mins
         self.duration_mins = duration_mins
         self.pattern_file = "mouse_pattern.json"
@@ -47,6 +57,21 @@ class MouseMover:
         self.grace_period_start: Optional[float] = None
         self.grace_period_active = False
         self.grace_period_duration = 0.5
+        self.activity_window_seconds = 5.0
+        self.activity_postpone_seconds = 5.0
+        self.activity_movement_threshold = 12
+        self.activity_poll_interval = 0.1
+        self.is_windows = sys.platform.startswith('win')
+        self._vk_codes = {
+            'left': 0x01,
+            'right': 0x02,
+            'middle': 0x04,
+            'x1': 0x05,
+            'x2': 0x06,
+        }
+        self.alarm_interval_mins = max(0.0, alarm_interval_mins or 0.0)
+        self.next_alarm_time: Optional[float] = None
+        self._schedule_next_alarm()
         
     def record_mouse_movement(self, duration: int = 5):
         """Record mouse movements and clicks for specified duration
@@ -61,7 +86,7 @@ class MouseMover:
         print("Recording starts in:")
         for i in range(3, 0, -1):
             print(f"{i}...")
-            time.sleep(1)
+                self._sleep_with_cancel(1.0, step=1.0)
         print("GO! Move your mouse and click around to create a pattern!")
 
         self.mouse_positions = []
@@ -96,7 +121,7 @@ class MouseMover:
             listener.start()
 
             # Record for specified duration
-            time.sleep(duration)
+                self._sleep_with_cancel(duration, step=0.25)
             self.recording = False
             listener.stop()
 
@@ -121,46 +146,21 @@ class MouseMover:
         start_time = time.time()
         self.mouse_positions = []
 
-        is_windows = sys.platform.startswith('win')
-
-        last_pos = self.mouse_controller.position
-        last_buttons = {
-            'left': False,
-            'right': False,
-            'middle': False,
-            'x1': False,
-            'x2': False,
-        }
-
-        # Windows virtual-key codes
-        VK = {
-            'left': 0x01,
-            'right': 0x02,
-            'middle': 0x04,
-            'x1': 0x05,
-            'x2': 0x06,
-        }
-
-        def win_get_async(key):
-            try:
-                return bool(ctypes.windll.user32.GetAsyncKeyState(key) & 0x8000)
-            except Exception:
-                return False
+        last_pos = self._get_mouse_position()
+        last_buttons = self._read_button_states()
 
         poll_interval = 0.02  # 50 Hz polling
         end_time = start_time + duration
 
         while time.time() < end_time:
+            self._check_alarm()
             now = time.time()
             ts = now - start_time
 
             # Position
-            try:
-                pos = self.mouse_controller.position
-            except Exception:
-                pos = last_pos
+            pos = self._get_mouse_position() or last_pos
 
-            if pos != last_pos:
+            if pos and last_pos and pos != last_pos:
                 self.mouse_positions.append({
                     'type': 'move',
                     'x': int(pos[0]),
@@ -170,10 +170,13 @@ class MouseMover:
                 last_pos = pos
 
             # Buttons (Windows only)
-            if is_windows:
-                for name, code in VK.items():
-                    pressed = win_get_async(code)
-                    if pressed != last_buttons[name]:
+            if self.is_windows and last_pos:
+                current_buttons = self._read_button_states()
+                for name, pressed in current_buttons.items():
+                    previous = last_buttons.get(name)
+                    if previous is None:
+                        previous = False
+                    if pressed != previous:
                         self.mouse_positions.append({
                             'type': 'click',
                             'x': int(last_pos[0]),
@@ -182,11 +185,147 @@ class MouseMover:
                             'pressed': pressed,
                             'timestamp': ts
                         })
-                        last_buttons[name] = pressed
+                last_buttons = current_buttons
 
             time.sleep(poll_interval)
+            self._check_alarm()
 
         print(f"Fallback recording complete! Captured {len(self.mouse_positions)} events.")
+
+    def _get_mouse_position(self) -> Optional[Tuple[int, int]]:
+        try:
+            pos = self.mouse_controller.position
+            return (int(pos[0]), int(pos[1]))
+        except Exception:
+            return None
+
+    def _win_get_async(self, key: int) -> bool:
+        if not self.is_windows:
+            return False
+        try:
+            return bool(ctypes.windll.user32.GetAsyncKeyState(key) & 0x8000)
+        except Exception:
+            return False
+
+    def _read_button_states(self) -> Dict[str, bool]:
+        if not self.is_windows:
+            return {}
+        return {name: self._win_get_async(code) for name, code in self._vk_codes.items()}
+
+    def _has_significant_movement(
+        self,
+        previous: Optional[Tuple[int, int]],
+        current: Optional[Tuple[int, int]],
+        threshold: Optional[int] = None
+    ) -> bool:
+        if not previous or not current:
+            return False
+        th = threshold if threshold is not None else self.activity_movement_threshold
+        return abs(current[0] - previous[0]) > th or abs(current[1] - previous[1]) > th
+
+    def _buttons_changed(self, previous: Dict[str, bool], current: Dict[str, bool]) -> bool:
+        for name in self._vk_codes.keys():
+            if current.get(name) != previous.get(name):
+                return True
+        return False
+
+    def _sleep_with_cancel(self, duration: float, step: float = 0.5) -> bool:
+        if duration <= 0:
+            self._check_alarm()
+            return self.running
+        end_time = time.time() + duration
+        while self.running:
+            self._check_alarm()
+            now = time.time()
+            if now >= end_time:
+                break
+            remaining = end_time - now
+            sleep_chunk = max(0.01, min(step, remaining))
+            time.sleep(sleep_chunk)
+            self._check_alarm()
+        self._check_alarm()
+        return self.running
+
+    def _schedule_next_alarm(self, reference_time: Optional[float] = None) -> None:
+        if self.alarm_interval_mins <= 0:
+            self.next_alarm_time = None
+            return
+        base = reference_time if reference_time is not None else time.time()
+        self.next_alarm_time = base + self.alarm_interval_mins * 60
+
+    def _trigger_alarm(self) -> None:
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        print(f"[{timestamp}] Alarm interval reached - playing 1 second beep...")
+        if self.is_windows and winsound is not None:
+            try:
+                winsound.Beep(1000, 1000)
+                return
+            except RuntimeError:
+                pass
+        # Fallback: ASCII bell + 1 second pause to mimic long beep
+        print('\a', end='', flush=True)
+        time.sleep(1)
+
+    def _check_alarm(self) -> None:
+        if self.alarm_interval_mins <= 0 or self.next_alarm_time is None:
+            return
+        now = time.time()
+        interval_seconds = self.alarm_interval_mins * 60
+        while self.running and now >= self.next_alarm_time:
+            self._trigger_alarm()
+            self.next_alarm_time += interval_seconds
+            now = time.time()
+
+    def wait_for_pre_replay_quiet_period(self) -> bool:
+        """Enforce a brief inactivity window before replaying automation."""
+        quiet_window = self.activity_window_seconds
+        postpone_window = self.activity_postpone_seconds
+        if quiet_window <= 0:
+            self._check_alarm()
+            return True
+
+        print(
+            f"Ensuring {quiet_window:.0f}-second inactivity window before replay. "
+            "Move the mouse or click to delay."
+        )
+
+        while self.running:
+            self._check_alarm()
+            window_start = time.time()
+            last_pos = self._get_mouse_position()
+            last_buttons = self._read_button_states()
+            quiet_period_ok = True
+            activity_reason = "mouse activity"
+
+            while self.running and (time.time() - window_start) < quiet_window:
+                if not self._sleep_with_cancel(self.activity_poll_interval, step=self.activity_poll_interval):
+                    return False
+                current_pos = self._get_mouse_position()
+                if self._has_significant_movement(last_pos, current_pos):
+                    quiet_period_ok = False
+                    activity_reason = "movement"
+                    break
+
+                current_buttons = self._read_button_states()
+                if self._buttons_changed(last_buttons, current_buttons):
+                    quiet_period_ok = False
+                    activity_reason = "click"
+                    break
+
+                last_pos = current_pos
+                last_buttons = current_buttons
+
+            if quiet_period_ok:
+                print("No recent activity detected. Proceeding with replay...")
+                return True
+
+            print(
+                f"User {activity_reason} detected. Postponing start by {postpone_window:.0f} seconds..."
+            )
+            if not self._sleep_with_cancel(postpone_window, step=0.25):
+                return False
+
+        return False
         
     def save_pattern(self):
         """Save recorded pattern to file"""
@@ -214,6 +353,7 @@ class MouseMover:
         print("Replaying mouse pattern with human-like imperfections...")
         self.currently_replaying = True
         self.user_moved_mouse = False
+        self._check_alarm()
         
         # Use approximately 85% of points from the pattern
         selected_points: List[Dict[str, Any]] = []
@@ -232,6 +372,7 @@ class MouseMover:
         prev_timestamp = 0.0
         
         for pos in selected_points:
+            self._check_alarm()
             if not self.running or self.user_moved_mouse:
                 if self.user_moved_mouse:
                     print("\n⚠️  User mouse movement detected! Stopping replay and resetting interval...")
@@ -292,6 +433,7 @@ class MouseMover:
                     sleep_variation = random.uniform(0.8, 1.2)
                     varied_sleep = base_sleep_per_step * sleep_variation
                     time.sleep(varied_sleep)
+                    self._check_alarm()
                     
                     # Check if grace period has expired
                     if self.grace_period_active and self.grace_period_start is not None:
@@ -335,9 +477,11 @@ class MouseMover:
             # Occasional longer pauses (15% chance)
             if random.random() < 0.15 and not self.user_moved_mouse:
                 time.sleep(random.uniform(0.02, 0.15))
+                self._check_alarm()
             # Very brief micro-pauses (30% chance) - simulates human hesitation
             elif random.random() < 0.3 and not self.user_moved_mouse:
                 time.sleep(random.uniform(0.005, 0.025))
+                self._check_alarm()
         
         self.currently_replaying = False
         if not self.user_moved_mouse:
@@ -396,7 +540,7 @@ class MouseMover:
         print("\nStarting in 3 seconds...")
         for i in range(3, 0, -1):
             print(f"{i}...")
-            time.sleep(1)
+            self._sleep_with_cancel(1.0, step=1.0)
         print("Starting!\n")
         
         # Set up F10 listener
@@ -413,6 +557,10 @@ class MouseMover:
         print(f"Moving mouse every {self.interval_mins} minute(s)")
         print("Press F10 at any time to stop!")
         print("Move your mouse during replay to take control and reset the timer!\n")
+        if self.alarm_interval_mins > 0:
+            print(f"Alarm beep enabled every {self.alarm_interval_mins} minute(s).\n")
+        else:
+            print("Alarm beep disabled.\n")
         
         # Start grace period at the very beginning
         self.grace_period_start = time.time()
@@ -422,6 +570,7 @@ class MouseMover:
         iteration = 0
         # Main loop
         while self.running:
+            self._check_alarm()
             iteration += 1
             current_time = datetime.now()
             
@@ -431,6 +580,9 @@ class MouseMover:
                 break
             
             print(f"\n[{current_time.strftime('%H:%M:%S')}] Iteration #{iteration}")
+            if not self.wait_for_pre_replay_quiet_period():
+                break
+
             self.replay_pattern()
             
             if not self.running:
@@ -451,12 +603,9 @@ class MouseMover:
             wait_seconds = actual_wait_mins * 60
             
             print(f"Waiting ~{actual_wait_mins:.1f} minute(s) until next movement...")
-            
-            # Break waiting into 1-second chunks to check for F10
-            for _ in range(int(wait_seconds)):
-                if not self.running:
-                    break
-                time.sleep(1)
+
+            if not self._sleep_with_cancel(wait_seconds, step=1.0):
+                break
         
         print("\n" + "=" * 50)
         print("Script stopped!")
@@ -516,6 +665,13 @@ Press F10 at any time to stop the script completely!
         default=None,
         help='Total duration in minutes (omit for unlimited)'
     )
+
+    parser.add_argument(
+        '-a', '--alarm',
+        type=float,
+        default=0.0,
+        help='Optional alarm/beep interval in minutes (set to 0 to disable)'
+    )
     
     args = parser.parse_args()
     
@@ -527,9 +683,13 @@ Press F10 at any time to stop the script completely!
     if args.duration is not None and args.duration <= 0:
         print("Error: Duration must be greater than 0")
         return
+
+    if args.alarm < 0:
+        print("Error: Alarm interval must be zero or positive")
+        return
     
     # Create and run the mouse mover
-    mover = MouseMover(args.interval, args.duration)
+    mover = MouseMover(args.interval, args.duration, args.alarm)
     
     try:
         mover.run()

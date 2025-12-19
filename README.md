@@ -15,6 +15,8 @@ An automated mouse movement script that records your mouse patterns and replays 
 - 👤 **Human-like movement** - subtle tremor (±2px), variable speed, micro-pauses
 - 🖱️ **Auto-detect manual control** - if you move the mouse yourself, it stops replay and resets the interval timer
 - ⏳ **Grace period** - 5-second grace period at start and after manual control to prevent false detection
+- 🚦 **Pre-start activity guard** - if you're active within 5 seconds of a planned replay, it delays the automation by 5 seconds until you're idle
+- 🔔 **Optional reminder beep** - supply `-a <minutes>` to play a 1-second beep on that cadence while the script runs
 
 ## Installation
 
@@ -37,13 +39,14 @@ python -m pip install "pynput>=1.8.1"
 
 ### Basic Syntax
 ```bash
-python macro.py -i <interval_minutes> [-d <duration_minutes>]
+python macro.py -i <interval_minutes> [-d <duration_minutes>] [-a <alarm_minutes>]
 ```
 
 ### Arguments
 
 - `-i`, `--interval` (required): Time interval in **minutes** between mouse movements
 - `-d`, `--duration` (optional): Total duration in **minutes** to run (omit for unlimited)
+- `-a`, `--alarm` (optional): Interval in **minutes** for the repeating 1-second beep (set `0` to disable)
 
 ### Examples
 
@@ -65,6 +68,11 @@ python macro.py -i 10 -d 120
 **Move mouse every 0.5 minutes (30 seconds) indefinitely:**
 ```bash
 python macro.py -i 0.5
+```
+
+**Run with a 10-minute reminder beep alongside movement automation:**
+```bash
+python macro.py -i 5 -a 10
 ```
 
 ## Replay Features 🎯
@@ -108,6 +116,7 @@ The script replays your pattern with **human-like imperfections** to avoid detec
 - Instantly stops the automated movement when manual movement detected
 - **Resets the interval timer** and restarts grace period for next cycle
 - Lets you take control at any time without stopping the script!
+- Before each replay the script now enforces a 5-second quiet window; any last-second movement or clicks delay automation by 5 seconds and restart the check
 
 ## How It Works
 
@@ -139,6 +148,13 @@ You can **move your mouse at any time** during automated replay:
 - **Restarts the 5-second grace period** for the next cycle
 - You regain full control immediately
 - Script continues running in the background and will replay after the next interval
+
+## Alarm Reminder (Optional)
+
+- Enable with `-a <minutes>` to play a **1-second, normal-volume beep** on your chosen cadence
+- The reminder timer runs independently of mouse automation, so it will fire even while the script is replaying patterns or waiting for the next interval
+- Set `-a 0` (or omit the flag) to disable the reminder entirely
+- On Windows the script uses `winsound.Beep(1000, 1000)`; on other platforms it emits an ASCII bell followed by a 1-second pause to mimic the same effect
 
 ## Pattern File
 
