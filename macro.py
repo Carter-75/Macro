@@ -298,22 +298,29 @@ class MouseMover:
     def _trigger_alarm(self) -> None:
         timestamp = datetime.now().strftime('%H:%M:%S')
         print(f"[{timestamp}] Alarm interval reached - playing 1 second beep...")
+        played_sound = False
         if self.is_windows and winsound is not None:
             try:
                 winsound.Beep(1500, 750)
                 winsound.Beep(1000, 500)
-                return
+                played_sound = True
             except RuntimeError:
                 pass
-            alias_flags = winsound.SND_ALIAS | winsound.SND_ASYNC
-            for alias in ('SystemHand', 'SystemExclamation', 'SystemAsterisk'):
-                try:
-                    winsound.PlaySound(alias, alias_flags)
-                    time.sleep(1)
-                    winsound.PlaySound(None, 0)
+            if not played_sound:
+                alias_flags = winsound.SND_ALIAS | winsound.SND_ASYNC
+                for alias in ('SystemHand', 'SystemExclamation', 'SystemAsterisk'):
+                    try:
+                        winsound.PlaySound(alias, alias_flags)
+                        time.sleep(1)
+                        winsound.PlaySound(None, 0)
+                        played_sound = True
+                        break
+                    except RuntimeError:
+                        continue
+                if played_sound:
                     return
-                except RuntimeError:
-                    continue
+            else:
+                return
         # Fallback: ASCII bell + 1 second pause to mimic long beep
         print('\a', end='', flush=True)
         time.sleep(1)
