@@ -210,13 +210,29 @@ class MouseMover:
 
     def _alarm_worker(self) -> None:
         interval_seconds = max(1.0, self.alarm_interval_mins * 60)
-        next_beep = time.time() + interval_seconds
         while not self._alarm_stop_event.is_set():
-            wait_duration = max(0.01, next_beep - time.time())
-            if self._alarm_stop_event.wait(wait_duration):
+            remaining_interval = interval_seconds
+            full_minutes = int(remaining_interval // 60)
+
+            for minutes_remaining in range(full_minutes, 0, -1):
+                if self._alarm_stop_event.wait(60):
+                    return
+                remaining_interval -= 60
+                minutes_left_after_wait = minutes_remaining - 1
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                if minutes_left_after_wait > 0:
+                    print(f"[{timestamp}] Alarm beep in {minutes_left_after_wait} minute(s)...")
+                else:
+                    print(f"[{timestamp}] Alarm beep in <1 minute...")
+
+            if remaining_interval > 0:
+                if self._alarm_stop_event.wait(remaining_interval):
+                    return
+
+            if self._alarm_stop_event.is_set():
                 break
+
             self._trigger_alarm()
-            next_beep += interval_seconds
 
     def _stop_alarm_thread(self) -> None:
         if not self.alarm_thread:
