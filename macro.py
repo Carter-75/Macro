@@ -42,7 +42,7 @@ except ImportError as exc:  # pragma: no cover - env specific
 class MouseMover:
     def __init__(
         self,
-        interval_mins: float,
+        interval_mins: Optional[float] = None,
         duration_mins: Optional[float] = None,
         alarm_interval_mins: float = 0.0
     ):
@@ -525,12 +525,48 @@ class MouseMover:
         listener = keyboard.Listener(on_press=on_press) # type: ignore
         listener.start()
         return listener
+    
+    def _run_alarm_only(self) -> None:
+        """Run in reminder-only mode when no interval is supplied."""
+        if self.alarm_interval_mins <= 0:
+            print("No interval or alarm specified. Nothing to do.")
+            return
+
+        print("\nAlarm-only mode enabled (no mouse automation configured).")
+        self.setup_keyboard_listener()
+
+        end_time = None
+        if self.duration_mins:
+            end_time = datetime.now() + timedelta(minutes=self.duration_mins)
+            print(f"Running alarm for {self.duration_mins} minute(s) (until {end_time.strftime('%H:%M:%S')})")
+        else:
+            print("Running alarm indefinitely (press F10 to stop)")
+
+        print(f"Playing 1-second beep every {self.alarm_interval_mins} minute(s).\n")
+
+        while self.running:
+            self._check_alarm()
+            if end_time and datetime.now() >= end_time:
+                print("\nDuration limit reached. Stopping alarm...")
+                break
+            if not self._sleep_with_cancel(1.0, step=1.0):
+                break
+
+        print("\n" + "=" * 50)
+        print("Script stopped!")
+        print("=" * 50)
         
     def run(self):
         """Main execution loop"""
         print("=" * 50)
         print("MOUSE MOVER SCRIPT (ANTI-DETECTION MODE)")
         print("=" * 50)
+
+        has_interval = bool(self.interval_mins and self.interval_mins > 0)
+
+        if not has_interval:
+            self._run_alarm_only()
+            return
         
         # Check if pattern exists
         pattern_exists = os.path.exists(self.pattern_file)
@@ -649,6 +685,9 @@ Examples:
   # Move mouse every ~10 minutes (slightly randomized) for 120 minutes
   python mouse_mover.py -i 10 -d 120
 
+    # Alarm-only reminder (no mouse movement) every 15 minutes
+    python mouse_mover.py -a 15
+
 REPLAY FEATURES:
   - Pattern sampling: Uses ~85% of recorded points (randomly skips ~15%), but always includes clicks
   - Human-like movement: Ease-in-out curves (not linear)
@@ -678,8 +717,9 @@ Press F10 at any time to stop the script completely!
     parser.add_argument(
         '-i', '--interval',
         type=float,
-        required=True,
-        help='Time interval in minutes between mouse movements'
+        required=False,
+        default=None,
+        help='Time interval in minutes between mouse movements (omit to skip automation)'
     )
     
     parser.add_argument(
@@ -699,7 +739,7 @@ Press F10 at any time to stop the script completely!
     args = parser.parse_args()
     
     # Validate arguments
-    if args.interval <= 0:
+    if args.interval is not None and args.interval <= 0:
         print("Error: Interval must be greater than 0")
         return
     
@@ -709,6 +749,10 @@ Press F10 at any time to stop the script completely!
 
     if args.alarm < 0:
         print("Error: Alarm interval must be zero or positive")
+        return
+
+    if (args.interval is None) and args.alarm <= 0:
+        print("Error: Provide either a positive interval or a positive alarm interval")
         return
     
     # Create and run the mouse mover

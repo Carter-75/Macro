@@ -39,14 +39,16 @@ python -m pip install "pynput>=1.8.1"
 
 ### Basic Syntax
 ```bash
-python macro.py -i <interval_minutes> [-d <duration_minutes>] [-a <alarm_minutes>]
+python macro.py [-i <interval_minutes>] [-d <duration_minutes>] [-a <alarm_minutes>]
 ```
+
+You must supply at least one of `-i` (mouse automation) or `-a` (alarm).
 
 ### Arguments
 
-- `-i`, `--interval` (required): Time interval in **minutes** between mouse movements
+- `-i`, `--interval` (optional but required for mouse automation): Time interval in **minutes** between mouse movements. Omit it if you just want the alarm/reminder feature.
 - `-d`, `--duration` (optional): Total duration in **minutes** to run (omit for unlimited)
-- `-a`, `--alarm` (optional): Interval in **minutes** for the repeating 1-second beep (set `0` to disable)
+- `-a`, `--alarm` (optional): Interval in **minutes** for the repeating 1-second beep (set `0` to disable). You can run the script in alarm-only mode by omitting `-i` and supplying `-a`.
 
 ### Examples
 
@@ -73,6 +75,11 @@ python macro.py -i 0.5
 **Run with a 10-minute reminder beep alongside movement automation:**
 ```bash
 python macro.py -i 5 -a 10
+```
+
+**Alarm-only reminder every 15 minutes (no mouse movement):**
+```bash
+python macro.py -a 15
 ```
 
 ## Replay Features 🎯
@@ -152,6 +159,7 @@ You can **move your mouse at any time** during automated replay:
 ## Alarm Reminder (Optional)
 
 - Enable with `-a <minutes>` to play a **1-second, normal-volume beep** on your chosen cadence
+- Omit `-i` if you only need the alarm/reminder and do not want mouse automation
 - The reminder timer runs independently of mouse automation, so it will fire even while the script is replaying patterns or waiting for the next interval
 - User activity cannot postpone the beep schedule; it will trigger exactly on the cadence you specify
 - Set `-a 0` (or omit the flag) to disable the reminder entirely
