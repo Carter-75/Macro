@@ -163,8 +163,7 @@ You can **move your mouse at any time** during automated replay:
 - The reminder timer runs independently of mouse automation, so it will fire even while the script is replaying patterns or waiting for the next interval
 - For alarm intervals of at least 1 minute, the script announces the remaining minutes each minute (e.g., "9 minute(s) left", then "8 minute(s) left") until the next beep
 - User activity cannot postpone the beep schedule; it will trigger exactly on the cadence you specify
-- Set `-a 0` (or omit the flag) to disable the reminder entirely
-- On Windows the script uses `winsound.Beep(1000, 1000)`; on other platforms it emits an ASCII bell followed by a 1-second pause to mimic the same effect
+- On Windows the script first plays OS system alert aliases (`SystemHand`, `SystemExclamation`, etc.) via `winsound.PlaySound` so the reminder mixes with any other audio (e.g., fullscreen video). If those aliases fail it falls back to `winsound.Beep`. On other platforms it emits an ASCII bell followed by a 1-second pause to mimic the same effect
 
 ## Pattern File
 
