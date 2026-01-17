@@ -39,17 +39,20 @@ except ImportError as exc:  # pragma: no cover - env specific
         "or 'python -m pip install pynput'."
     ) from exc
 
+
 class MouseMover:
     def __init__(
         self,
         interval_mins: Optional[float] = None,
         duration_mins: Optional[float] = None,
-        alarm_interval_mins: float = 0.0
+        alarm_interval_mins: float = 0.0,
+        track_keys: bool = False
     ):
         self.interval_mins = interval_mins
         self.duration_mins = duration_mins
         self.pattern_file = "mouse_pattern.json"
         self.mouse_positions: List[Dict[str, Any]] = []
+        self.track_keys = track_keys
         self.recording = False
         self.running = True
         self.mouse_controller = MouseController()
@@ -75,94 +78,90 @@ class MouseMover:
         self.alarm_thread: Optional[threading.Thread] = None
         if self.alarm_interval_mins > 0:
             self._start_alarm_thread()
-        
+
+        # For key replay
+        self.held_modifiers = set()
+
+        # For anti-detection
+        self.pattern_center_x = 0.0
+        self.pattern_center_y = 0.0
+
+    def _test_keyboard_listener(self) -> bool:
+        if not self.track_keys:
+            return True
+        print("[KEYBOARD TEST] Testing keyboard listener...")
+        try:
+            keyboard_listener = keyboard.Listener(on_press=lambda key: None, on_release=lambda key: None)
+            keyboard_listener.start()
+            time.sleep(0.1)
+            keyboard_listener.stop()
+            print("[KEYBOARD TEST] ✓ Keyboard listener works!")
+            return True
+        except Exception as e:
+            print(f"[KEYBOARD TEST] ✗ Keyboard listener failed: {type(e).__name__}: {e}")
+            print("[KEYBOARD TEST] WARNING: Key tracking will not work. Continuing without key tracking...")
+            self.track_keys = False
+            return False
+
     def record_mouse_movement(self, duration: int = 5):
-        """Record mouse movements and clicks for specified duration
-
-        Attempts to use the `pynput` listener first; if the listener fails
-        or records no events (some Windows/Python combinations cause listener
-        issues), fall back to a polling-based recorder that uses the Windows
-        `GetAsyncKeyState` API via `ctypes` when available.
-        """
+        self._test_keyboard_listener()
         print(f"\nRecording mouse movement and clicks for {duration} seconds...")
-
         print("Recording starts in:")
         for i in range(3, 0, -1):
             print(f"{i}...")
             self._sleep_with_cancel(1.0, step=1.0)
         print("GO! Move your mouse and click around to create a pattern!")
+        self._fallback_record_mouse_movement(duration)
 
-        self.mouse_positions = []
-        self.recording = True
-        start_time = time.time()
-
-        def on_move(x: int, y: int):
-            if self.recording:
-                elapsed = time.time() - start_time
-                self.mouse_positions.append({
-                    'type': 'move',
-                    'x': x,
-                    'y': y,
-                    'timestamp': elapsed
-                })
-
-        def on_click(x: int, y: int, button: mouse.Button, pressed: bool):
-            if self.recording:
-                elapsed = time.time() - start_time
-                self.mouse_positions.append({
-                    'type': 'click',
-                    'x': x,
-                    'y': y,
-                    'button': str(button),
-                    'pressed': pressed,
-                    'timestamp': elapsed
-                })
-
-        # Try to use pynput listener first (may raise or capture nothing)
-        try:
-            listener = mouse.Listener(on_move=on_move, on_click=on_click)
-            listener.start()
-
-            # Record for specified duration
-            self._sleep_with_cancel(duration, step=0.25)
-            self.recording = False
-            listener.stop()
-
-            print(f"Recording complete! Captured {len(self.mouse_positions)} events.")
-        except Exception as e:
-            print(f"Listener failed with error: {e}. Falling back to polling recorder...")
-            self.recording = False
-            self._fallback_record_mouse_movement(duration)
-
-        # If listener recorded nothing, use fallback polling recorder
-        if not self.mouse_positions:
-            print("No events captured by listener; using polling fallback recorder...")
-            self._fallback_record_mouse_movement(duration)
-    
     def _fallback_record_mouse_movement(self, duration: int = 5):
-        """Fallback recorder that polls mouse position and button state.
-        Uses Windows API via ctypes when available for click detection; otherwise
-        polls `mouse_controller.position` and records moves. This is used when
-        the pynput listener fails on some environments.
-        """
         print("\nStarting polling-based fallback recorder...")
         start_time = time.time()
         self.mouse_positions = []
-
         last_pos = self._get_mouse_position()
         last_buttons = self._read_button_states()
 
-        poll_interval = 0.02  # 50 Hz polling
-        end_time = start_time + duration
+        keyboard_listener = None
+        key_events = {}
+        if self.track_keys:
+            try:
+                def on_key_press(key: Any):
+                    elapsed = time.time() - start_time
+                    key_name = key.char if hasattr(key, 'char') and key.char else str(key).split('.')[-1]
+                    if key_name not in key_events or not key_events[key_name].get('pressed'):
+                        self.mouse_positions.append({
+                            'type': 'key',
+                            'key': key_name,
+                            'pressed': True,
+                            'timestamp': elapsed
+                        })
+                        key_events[key_name] = {'pressed': True, 'time': elapsed}
 
+                def on_key_release(key: Any):
+                    elapsed = time.time() - start_time
+                    key_name = key.char if hasattr(key, 'char') and key.char else str(key).split('.')[-1]
+                    if key_name in key_events and key_events[key_name].get('pressed'):
+                        self.mouse_positions.append({
+                            'type': 'key',
+                            'key': key_name,
+                            'pressed': False,
+                            'timestamp': elapsed
+                        })
+                        key_events[key_name] = {'pressed': False, 'time': elapsed}
+
+                keyboard_listener = keyboard.Listener(on_press=on_key_press, on_release=on_key_release)
+                keyboard_listener.start()
+                print("[INFO] Keyboard listener active - key presses will be recorded")
+            except Exception as kb_error:
+                print(f"[WARNING] Keyboard listener failed: {type(kb_error).__name__}: {kb_error}")
+                self.track_keys = False
+
+        poll_interval = 0.02
+        end_time = start_time + duration
         while time.time() < end_time:
             self._check_alarm()
             now = time.time()
             ts = now - start_time
-
-            # Position
             pos = self._get_mouse_position() or last_pos
-
             if pos and last_pos and pos != last_pos:
                 self.mouse_positions.append({
                     'type': 'move',
@@ -172,13 +171,10 @@ class MouseMover:
                 })
                 last_pos = pos
 
-            # Buttons (Windows only)
             if self.is_windows and last_pos:
                 current_buttons = self._read_button_states()
                 for name, pressed in current_buttons.items():
-                    previous = last_buttons.get(name)
-                    if previous is None:
-                        previous = False
+                    previous = last_buttons.get(name, False)
                     if pressed != previous:
                         self.mouse_positions.append({
                             'type': 'click',
@@ -193,6 +189,8 @@ class MouseMover:
             time.sleep(poll_interval)
             self._check_alarm()
 
+        if keyboard_listener:
+            keyboard_listener.stop()
         print(f"Fallback recording complete! Captured {len(self.mouse_positions)} events.")
 
     def _start_alarm_thread(self) -> None:
@@ -213,7 +211,6 @@ class MouseMover:
         while not self._alarm_stop_event.is_set():
             remaining_interval = interval_seconds
             full_minutes = int(remaining_interval // 60)
-
             for minutes_remaining in range(full_minutes, 0, -1):
                 if self._alarm_stop_event.wait(60):
                     return
@@ -224,14 +221,11 @@ class MouseMover:
                     print(f"[{timestamp}] Alarm beep in {minutes_left_after_wait} minute(s)...")
                 else:
                     print(f"[{timestamp}] Alarm beep in <1 minute...")
-
             if remaining_interval > 0:
                 if self._alarm_stop_event.wait(remaining_interval):
                     return
-
             if self._alarm_stop_event.is_set():
                 break
-
             self._trigger_alarm()
 
     def _stop_alarm_thread(self) -> None:
@@ -319,9 +313,6 @@ class MouseMover:
                         continue
                 if played_sound:
                     return
-            else:
-                return
-        # Fallback: ASCII bell + 1 second pause to mimic long beep
         print('\a', end='', flush=True)
         time.sleep(1)
 
@@ -333,18 +324,15 @@ class MouseMover:
                 self._start_alarm_thread()
 
     def wait_for_pre_replay_quiet_period(self) -> bool:
-        """Enforce a brief inactivity window before replaying automation."""
         quiet_window = self.activity_window_seconds
         postpone_window = self.activity_postpone_seconds
         if quiet_window <= 0:
             self._check_alarm()
             return True
-
         print(
             f"Ensuring {quiet_window:.0f}-second inactivity window before replay. "
             "Move the mouse or click to delay."
         )
-
         while self.running:
             self._check_alarm()
             window_start = time.time()
@@ -352,7 +340,6 @@ class MouseMover:
             last_buttons = self._read_button_states()
             quiet_period_ok = True
             activity_reason = "mouse activity"
-
             while self.running and (time.time() - window_start) < quiet_window:
                 if not self._sleep_with_cancel(self.activity_poll_interval, step=self.activity_poll_interval):
                     return False
@@ -361,155 +348,151 @@ class MouseMover:
                     quiet_period_ok = False
                     activity_reason = "movement"
                     break
-
                 current_buttons = self._read_button_states()
                 if self._buttons_changed(last_buttons, current_buttons):
                     quiet_period_ok = False
                     activity_reason = "click"
                     break
-
                 last_pos = current_pos
                 last_buttons = current_buttons
-
             if quiet_period_ok:
                 print("No recent activity detected. Proceeding with replay...")
                 return True
-
             print(
                 f"User {activity_reason} detected. Postponing start by {postpone_window:.0f} seconds..."
             )
             if not self._sleep_with_cancel(postpone_window, step=0.25):
                 return False
-
         return False
-        
+
     def save_pattern(self):
-        """Save recorded pattern to file"""
         with open(self.pattern_file, 'w') as f:
             json.dump(self.mouse_positions, f)
         print(f"Pattern saved to {self.pattern_file}")
-        
+
     def load_pattern(self):
-        """Load pattern from file"""
         try:
             with open(self.pattern_file, 'r') as f:
                 self.mouse_positions = json.load(f)
-            print(f"Loaded pattern with {len(self.mouse_positions)} positions.")
+            # Compute center only from valid x/y entries
+            xs = [p['x'] for p in self.mouse_positions if 'x' in p and isinstance(p['x'], (int, float))]
+            ys = [p['y'] for p in self.mouse_positions if 'y' in p and isinstance(p['y'], (int, float))]
+            if xs and ys:
+                self.pattern_center_x = sum(xs) / len(xs)
+                self.pattern_center_y = sum(ys) / len(ys)
+            else:
+                self.pattern_center_x = self.pattern_center_y = 0.0
+            print(f"Loaded pattern with {len(self.mouse_positions)} positions. Center: ({self.pattern_center_x:.1f}, {self.pattern_center_y:.1f})")
             return True
         except FileNotFoundError:
             print("No saved pattern found.")
             return False
-            
+        except Exception as e:
+            print(f"Error loading pattern: {e}")
+            return False
+
     def replay_pattern(self):
-        """Replay the recorded mouse pattern with natural human-like sampling"""
         if not self.mouse_positions:
             print("No pattern to replay!")
             return
-        
+
         print("Replaying mouse pattern with human-like imperfections...")
         self.currently_replaying = True
         self.user_moved_mouse = False
         self._check_alarm()
-        
-        # Use approximately 85% of points from the pattern
-        selected_points: List[Dict[str, Any]] = []
+
+        # Anti-detection variation
+        if random.random() < 0.92:
+            global_offset_x = random.randint(-80, 80)
+            global_offset_y = random.randint(-60, 60)
+            scale = random.uniform(0.94, 1.06)
+        else:
+            global_offset_x = global_offset_y = 0
+            scale = 1.0
+
+        selected_points = []
         total_points = len(self.mouse_positions)
-        
         for i, pos in enumerate(self.mouse_positions):
-            # 85% chance to include each point, plus always include first and last
-            # Always include clicks to ensure actions are performed
             is_click = pos.get('type') == 'click'
             if is_click or i == 0 or i == total_points - 1 or random.random() < 0.85:
                 selected_points.append(pos)
-        
+
         print(f"Selected {len(selected_points)} points from {total_points} (~{len(selected_points)/total_points*100:.1f}%)")
-        
-        # Now move through the selected points with exact positions (0 jitter)
+
         prev_timestamp = 0.0
-        
+        self.held_modifiers = set()
+
         for pos in selected_points:
             self._check_alarm()
             if not self.running or self.user_moved_mouse:
                 if self.user_moved_mouse:
-                    print("\n⚠️  User mouse movement detected! Stopping replay and resetting interval...")
+                    print("\n⚠️ User mouse movement detected! Stopping replay and resetting interval...")
                 break
-            
-            # No random shifts - use exact recorded positions for 0 jitter
-            target_x = int(pos['x'])
-            target_y = int(pos['y'])
-            
-            # Ensure position stays within reasonable bounds
-            target_x = max(0, min(target_x, 3840))
-            target_y = max(0, min(target_y, 2160))
-            
-            # Calculate time to reach this point (with randomness 85-115%)
+
+            # Position handling only for events with coordinates
+            target_x = target_y = None
+            if pos.get('type') in ('move', 'click') and 'x' in pos and 'y' in pos:
+                scaled_x = (pos['x'] - self.pattern_center_x) * scale + self.pattern_center_x
+                scaled_y = (pos['y'] - self.pattern_center_y) * scale + self.pattern_center_y
+                target_x = int(scaled_x + global_offset_x)
+                target_y = int(scaled_y + global_offset_y)
+                target_x = max(0, min(target_x, 3840))
+                target_y = max(0, min(target_y, 2160))
+
             current_timestamp = pos['timestamp']
             time_to_move = current_timestamp - prev_timestamp
-            
-            if time_to_move > 0:
-                # Add a little randomness to timing (85% to 115%)
-                time_variation = random.uniform(0.85, 1.15)
-                time_to_move *= time_variation
-                
-                # Smooth movement to this target point
-                current_x, current_y = self.mouse_controller.position
-                
-                # Calculate distance to determine number of steps
-                distance = ((target_x - current_x) ** 2 + (target_y - current_y) ** 2) ** 0.5
-                steps = max(5, int(distance / 30))  # More steps for longer distances
-                
-                # Time per step to match original speed
-                base_sleep_per_step = time_to_move / steps if steps > 0 else 0.001
-                
-                for step in range(steps):
-                    if not self.running or self.user_moved_mouse:
-                        if self.user_moved_mouse:
-                            print("\n⚠️  User mouse movement detected! Stopping replay and resetting interval...")
-                        break
-                    
-                    # Use ease-in-out curve instead of linear for more human-like movement
-                    progress = (step + 1) / steps
-                    # Ease-in-out formula: smoother acceleration/deceleration
-                    eased_progress = progress * progress * (3.0 - 2.0 * progress)
-                    
-                    # Calculate position with easing
-                    expected_x = int(current_x + (target_x - current_x) * eased_progress)
-                    expected_y = int(current_y + (target_y - current_y) * eased_progress)
-                    
-                    # Add subtle hand tremor (±2 pixels) to simulate human imperfection
-                    tremor_x = random.randint(-2, 2)
-                    tremor_y = random.randint(-2, 2)
-                    actual_x = expected_x + tremor_x
-                    actual_y = expected_y + tremor_y
-                    
-                    # Move mouse with tremor
-                    self.mouse_controller.position = (actual_x, actual_y)
-                    
-                    # Variable timing - add small random variation to each step (±20%)
-                    sleep_variation = random.uniform(0.8, 1.2)
-                    varied_sleep = base_sleep_per_step * sleep_variation
-                    time.sleep(varied_sleep)
-                    self._check_alarm()
-                    
-                    # Check if grace period has expired
-                    if self.grace_period_active and self.grace_period_start is not None:
-                        if time.time() - self.grace_period_start > self.grace_period_duration:
-                            self.grace_period_active = False
-                            print("(Grace period ended - user detection now active)")
-                    
-                    # Check if user moved the mouse (only if grace period is over)
-                    # Need to account for our own tremor (±2) plus some tolerance
-                    if not self.grace_period_active:
-                        current_actual_x, current_actual_y = self.mouse_controller.position
-                        # Check if moved more than tremor + tolerance (20 pixels total)
-                        if abs(current_actual_x - actual_x) > 20 or abs(current_actual_y - actual_y) > 20:
-                            self.user_moved_mouse = True
+
+            # Movement logic only when we have a valid target
+            if target_x is not None and target_y is not None:
+                if time_to_move > 0:
+                    time_variation = random.uniform(0.85, 1.15)
+                    time_to_move *= time_variation
+
+                    current_x, current_y = self.mouse_controller.position
+                    distance = ((target_x - current_x) ** 2 + (target_y - current_y) ** 2) ** 0.5
+                    steps = max(5, int(distance / 30))
+                    base_sleep_per_step = time_to_move / steps if steps > 0 else 0.001
+
+                    for step in range(steps):
+                        if not self.running or self.user_moved_mouse:
+                            if self.user_moved_mouse:
+                                print("\n⚠️ User mouse movement detected! Stopping replay and resetting interval...")
                             break
-            else:
-                # If no time difference, just move there instantly
-                self.mouse_controller.position = (target_x, target_y)
-            
-            # Handle clicks
+
+                        progress = (step + 1) / steps
+                        eased_progress = progress * progress * (3.0 - 2.0 * progress)
+
+                        expected_x = int(current_x + (target_x - current_x) * eased_progress)
+                        expected_y = int(current_y + (target_y - current_y) * eased_progress)
+
+                        tremor_x = random.randint(-2, 2)
+                        tremor_y = random.randint(-2, 2)
+                        actual_x = expected_x + tremor_x
+                        actual_y = expected_y + tremor_y
+
+                        self.mouse_controller.position = (actual_x, actual_y)
+
+                        sleep_variation = random.uniform(0.8, 1.2)
+                        time.sleep(base_sleep_per_step * sleep_variation)
+                        self._check_alarm()
+
+                        if self.grace_period_active and self.grace_period_start is not None:
+                            if time.time() - self.grace_period_start > self.grace_period_duration:
+                                self.grace_period_active = False
+                                print("(Grace period ended - user detection now active)")
+
+                        if not self.grace_period_active:
+                            cx, cy = self.mouse_controller.position
+                            if abs(cx - actual_x) > 20 or abs(cy - actual_y) > 20:
+                                self.user_moved_mouse = True
+                                break
+                else:
+                    self.mouse_controller.position = (target_x, target_y)
+            elif time_to_move > 0:
+                # Preserve timing for key events
+                time.sleep(time_to_move * random.uniform(0.85, 1.15))
+
+            # Click handling
             if pos.get('type') == 'click':
                 button_str = pos['button']
                 button = mouse.Button.left
@@ -521,62 +504,127 @@ class MouseMover:
                     button = mouse.Button.x1
                 elif 'x2' in button_str:
                     button = mouse.Button.x2
-                
+
                 if pos['pressed']:
                     self.mouse_controller.press(button)
                 else:
                     self.mouse_controller.release(button)
 
+            # Key handling
+            if pos.get('type') == 'key':
+                key_str = pos['key']
+                try:
+                    kb = keyboard.Controller()
+                    is_pressed = pos['pressed']
+
+                    modifiers = {
+                        'shift': keyboard.Key.shift,
+                        'ctrl': keyboard.Key.ctrl,
+                        'alt': keyboard.Key.alt,
+                        'cmd': keyboard.Key.cmd,
+                    }
+
+                    if key_str in modifiers:
+                        mod_key = modifiers[key_str]
+                        if is_pressed:
+                            kb.press(mod_key)
+                            self.held_modifiers.add(key_str)
+                        else:
+                            kb.release(mod_key)
+                            self.held_modifiers.discard(key_str)
+
+                    elif key_str.startswith('Key.'):
+                        key_name = key_str.split('.')[-1]
+                        special_keys = {
+                            'enter': keyboard.Key.enter,
+                            'backspace': keyboard.Key.backspace,
+                            'space': keyboard.Key.space,
+                            'tab': keyboard.Key.tab,
+                            'esc': keyboard.Key.esc,
+                            'up': keyboard.Key.up,
+                            'down': keyboard.Key.down,
+                            'left': keyboard.Key.left,
+                            'right': keyboard.Key.right,
+                            'delete': keyboard.Key.delete,
+                            'page_up': keyboard.Key.page_up,
+                            'page_down': keyboard.Key.page_down,
+                            'home': keyboard.Key.home,
+                            'end': keyboard.Key.end,
+                            'f1': keyboard.Key.f1,
+                            'f2': keyboard.Key.f2,
+                            'f3': keyboard.Key.f3,
+                            'f4': keyboard.Key.f4,
+                            'f5': keyboard.Key.f5,
+                            'f6': keyboard.Key.f6,
+                            'f7': keyboard.Key.f7,
+                            'f8': keyboard.Key.f8,
+                            'f9': keyboard.Key.f9,
+                            'f10': keyboard.Key.f10,
+                            'f11': keyboard.Key.f11,
+                            'f12': keyboard.Key.f12,
+                        }
+                        if key_name in special_keys:
+                            key_obj = special_keys[key_name]
+                            if is_pressed:
+                                kb.press(key_obj)
+                            else:
+                                kb.release(key_obj)
+
+                    else:
+                        if is_pressed and len(key_str) == 1:
+                            time.sleep(random.uniform(0.045, 0.22))
+                            if random.random() < 0.18:
+                                continue
+                            try:
+                                kb.press(key_str)
+                                time.sleep(random.uniform(0.01, 0.04))
+                                kb.release(key_str)
+                            except:
+                                kb.type(key_str)
+                except Exception:
+                    pass
+
             prev_timestamp = current_timestamp
-            
-            # Random micro-pauses between points for human-like behavior
-            # Occasional longer pauses (15% chance)
+
             if random.random() < 0.15 and not self.user_moved_mouse:
                 time.sleep(random.uniform(0.02, 0.15))
                 self._check_alarm()
-            # Very brief micro-pauses (30% chance) - simulates human hesitation
             elif random.random() < 0.3 and not self.user_moved_mouse:
                 time.sleep(random.uniform(0.005, 0.025))
                 self._check_alarm()
-        
+
         self.currently_replaying = False
         if not self.user_moved_mouse:
             print("Pattern replay complete!")
-        
+
     def setup_keyboard_listener(self):
-        """Set up F10 key listener to stop the script"""
         def on_press(key: Any):
             try:
                 if key == keyboard.Key.f10:
                     print("\n\nF10 pressed! Stopping script...")
                     self.running = False
-                    return False  # Stop listener
+                    return False
             except AttributeError:
                 pass
             return None
-        
-        listener = keyboard.Listener(on_press=on_press) # type: ignore
+
+        listener = keyboard.Listener(on_press=on_press)
         listener.start()
         return listener
-    
+
     def _run_alarm_only(self) -> None:
-        """Run in reminder-only mode when no interval is supplied."""
         if self.alarm_interval_mins <= 0:
             print("No interval or alarm specified. Nothing to do.")
             return
-
         print("\nAlarm-only mode enabled (no mouse automation configured).")
         self.setup_keyboard_listener()
-
         end_time = None
         if self.duration_mins:
             end_time = datetime.now() + timedelta(minutes=self.duration_mins)
             print(f"Running alarm for {self.duration_mins} minute(s) (until {end_time.strftime('%H:%M:%S')})")
         else:
             print("Running alarm indefinitely (press F10 to stop)")
-
         print(f"Playing 1-second beep every {self.alarm_interval_mins} minute(s).\n")
-
         while self.running:
             self._check_alarm()
             if end_time and datetime.now() >= end_time:
@@ -584,32 +632,28 @@ class MouseMover:
                 break
             if not self._sleep_with_cancel(1.0, step=1.0):
                 break
-
         print("\n" + "=" * 50)
         print("Script stopped!")
         print("=" * 50)
-        
+
     def run(self):
-        """Main execution loop"""
         print("=" * 50)
         print("MOUSE MOVER SCRIPT (ANTI-DETECTION MODE)")
         print("=" * 50)
-
         has_interval = bool(self.interval_mins and self.interval_mins > 0)
-
         if not has_interval:
             self._run_alarm_only()
             return
-        
-        # Check if pattern exists
+
         pattern_exists = os.path.exists(self.pattern_file)
-        
+
         if pattern_exists:
             choice = input("Saved pattern found. Use it? (y/n) or 'r' to reset: ").lower()
             if choice == 'r':
                 print("Resetting pattern...")
                 self.record_mouse_movement(5)
                 self.save_pattern()
+                self.load_pattern()  # Load to compute center
                 self.grace_period_duration = 5.0
             elif choice == 'y':
                 self.load_pattern()
@@ -617,35 +661,34 @@ class MouseMover:
             else:
                 self.record_mouse_movement(5)
                 self.save_pattern()
+                self.load_pattern()
                 self.grace_period_duration = 5.0
         else:
             print("No saved pattern found. Recording new pattern...")
             self.record_mouse_movement(5)
             self.save_pattern()
+            self.load_pattern()  # Load to compute center
             self.grace_period_duration = 5.0
-        
+
         if not self.mouse_positions:
             print("No pattern available. Exiting.")
             return
 
-        # Initial 3 second countdown
         print("\nStarting in 3 seconds...")
         for i in range(3, 0, -1):
             print(f"{i}...")
             self._sleep_with_cancel(1.0, step=1.0)
         print("Starting!\n")
-        
-        # Set up F10 listener
+
         self.setup_keyboard_listener()
-        
-        # Calculate end time if duration is specified
+
         end_time = None
         if self.duration_mins:
             end_time = datetime.now() + timedelta(minutes=self.duration_mins)
             print(f"\nRunning for {self.duration_mins} minutes (until {end_time.strftime('%H:%M:%S')})")
         else:
             print("\nRunning indefinitely (press F10 to stop)")
-        
+
         print(f"Moving mouse every {self.interval_mins} minute(s)")
         print("Press F10 at any time to stop!")
         print("Move your mouse during replay to take control and reset the timer!\n")
@@ -653,144 +696,88 @@ class MouseMover:
             print(f"Alarm beep enabled every {self.alarm_interval_mins} minute(s).\n")
         else:
             print("Alarm beep disabled.\n")
-        
-        # Start grace period at the very beginning
+
         self.grace_period_start = time.time()
         self.grace_period_active = True
         print(f"({self.grace_period_duration}-second grace period active - user detection will start after)\n")
-        
+
         iteration = 0
-        # Main loop
         while self.running:
             self._check_alarm()
             iteration += 1
             current_time = datetime.now()
-            
-            # Check if we've reached the end time
+
             if end_time and current_time >= end_time:
                 print("\nDuration limit reached. Stopping...")
                 break
-            
+
             print(f"\n[{current_time.strftime('%H:%M:%S')}] Iteration #{iteration}")
             if not self.wait_for_pre_replay_quiet_period():
                 break
-
             self.replay_pattern()
-            
+
             if not self.running:
                 break
-            
-            # If user moved mouse during replay, reset immediately and restart grace period
+
             if self.user_moved_mouse:
                 print("Interval timer reset! Waiting full interval before next replay...")
-                self.user_moved_mouse = False  # Reset flag for next iteration
-                # Restart grace period after user takes control
+                self.user_moved_mouse = False
                 self.grace_period_start = time.time()
                 self.grace_period_active = True
                 print(f"({self.grace_period_duration}-second grace period restarted after manual control)\n")
-            
-            # Wait for the interval with subtle random variation (±10-20% of interval)
-            random_variation = random.uniform(0.85, 1.15)  # 85% to 115% of original interval
+
+            random_variation = random.uniform(0.85, 1.15)
             actual_wait_mins = self.interval_mins * random_variation
             wait_seconds = actual_wait_mins * 60
-            
-            print(f"Waiting ~{actual_wait_mins:.1f} minute(s) until next movement...")
 
+            print(f"Waiting ~{actual_wait_mins:.1f} minute(s) until next movement...")
             if not self._sleep_with_cancel(wait_seconds, step=1.0):
                 break
-        
+
         print("\n" + "=" * 50)
         print("Script stopped!")
         print("=" * 50)
 
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Automated mouse mover - records and replays mouse patterns (movements and clicks) with human-like imperfections to avoid detection",
+        description="Automated mouse mover - records and replays mouse patterns with human-like imperfections",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Move mouse every ~5 minutes (slightly randomized), run indefinitely
   python mouse_mover.py -i 5
-  
-  # Move mouse every ~2 minutes (slightly randomized) for 60 minutes total
   python mouse_mover.py -i 2 -d 60
-  
-  # Move mouse every ~10 minutes (slightly randomized) for 120 minutes
   python mouse_mover.py -i 10 -d 120
-
-    # Alarm-only reminder (no mouse movement) every 15 minutes
-    python mouse_mover.py -a 15
-
-REPLAY FEATURES:
-  - Pattern sampling: Uses ~85% of recorded points (randomly skips ~15%), but always includes clicks
-  - Human-like movement: Ease-in-out curves (not linear)
-  - Hand tremor simulation: ±2 pixel micro-movements during motion
-  - Variable timing: Each step varies ±20% from base speed
-  - Timing preservation: Matches your original movement speed (85-115% variation)
-  - Interval variations: 85% to 115% of specified interval
-  - Random micro-pauses: 15% chance longer (0.02-0.15s), 30% chance brief (0.005-0.025s)
-
-ANTI-DETECTION FEATURES:
-  - Non-linear curves (ease-in-out) mimic natural acceleration/deceleration
-  - Subtle hand tremor prevents perfect pixel-aligned movements
-  - Variable step timing prevents robotic consistency
-  - Random point sampling ensures no two replays are identical
-  - Micro-pauses simulate human hesitation and decision-making
-
-MANUAL CONTROL:
-  - Move your mouse during replay to instantly take control
-  - 0.5-second grace period at start and after you take control
-  - Script detects movement >15 pixels after grace period ends
-  - Interval timer resets and grace period restarts when you take control
-  
-Press F10 at any time to stop the script completely!
+  python mouse_mover.py -a 15
+  python mouse_mover.py -a 10 -k -i 5
         """
     )
-    
-    parser.add_argument(
-        '-i', '--interval',
-        type=float,
-        required=False,
-        default=None,
-        help='Time interval in minutes between mouse movements (omit to skip automation)'
-    )
-    
-    parser.add_argument(
-        '-d', '--duration',
-        type=float,
-        default=None,
-        help='Total duration in minutes (omit for unlimited)'
-    )
+    parser.add_argument('-i', '--interval', type=float, default=None,
+                        help='Interval in minutes between movements')
+    parser.add_argument('-d', '--duration', type=float, default=None,
+                        help='Total run duration in minutes')
+    parser.add_argument('-a', '--alarm', type=float, default=0.0,
+                        help='Alarm interval in minutes')
+    parser.add_argument('-k', '--track-keys', action='store_true',
+                        help='Enable keyboard tracking and replay')
 
-    parser.add_argument(
-        '-a', '--alarm',
-        type=float,
-        default=0.0,
-        help='Optional alarm/beep interval in minutes (set to 0 to disable)'
-    )
-    
     args = parser.parse_args()
-    
-    # Validate arguments
+
     if args.interval is not None and args.interval <= 0:
         print("Error: Interval must be greater than 0")
         return
-    
     if args.duration is not None and args.duration <= 0:
         print("Error: Duration must be greater than 0")
         return
-
     if args.alarm < 0:
-        print("Error: Alarm interval must be zero or positive")
+        print("Error: Alarm must be >= 0")
+        return
+    if args.interval is None and args.alarm <= 0:
+        print("Error: Provide either --interval or a positive --alarm")
         return
 
-    if (args.interval is None) and args.alarm <= 0:
-        print("Error: Provide either a positive interval or a positive alarm interval")
-        return
-    
-    # Create and run the mouse mover
-    mover = MouseMover(args.interval, args.duration, args.alarm)
-    
+    mover = MouseMover(args.interval, args.duration, args.alarm, args.track_keys)
+
     try:
         mover.run()
     except KeyboardInterrupt:
@@ -800,6 +787,6 @@ Press F10 at any time to stop the script completely!
     finally:
         mover._stop_alarm_thread()
 
+
 if __name__ == "__main__":
     main()
-
